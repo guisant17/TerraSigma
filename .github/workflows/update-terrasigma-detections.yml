@@ -90,6 +90,13 @@ jobs:
           terraform validate
           echo "Terraform validation completed"
 
+      - name: Clean up Terraform artifacts
+        run: |
+          # Remove .terraform directory to avoid large file errors
+          rm -rf TF/.terraform
+          rm -f TF/.terraform.lock.hcl
+          echo "Cleaned up Terraform artifacts"
+
       - name: Check for changes
         id: changes
         run: |
