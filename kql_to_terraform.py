@@ -28,44 +28,43 @@ class KQLToTerraform:
         }
         self.failures = []  # Track detailed failure information
         
-        # Entity mapping configuration based on common field patterns
+        # Entity mapping configuration based on Microsoft Sentinel entity reference
+        # https://learn.microsoft.com/en-us/azure/sentinel/entities-reference
         self.entity_mappings = {
             'Account': {
                 'fields': ['AccountName', 'AccountDomain', 'AccountSid', 'AccountUpn', 
-                          'InitiatingProcessAccountName', 'InitiatingProcessAccountDomain',
-                          'InitiatingProcessAccountSid', 'InitiatingProcessAccountUpn'],
+                          'AccountObjectId', 'InitiatingProcessAccountName', 
+                          'InitiatingProcessAccountDomain', 'InitiatingProcessAccountSid', 
+                          'InitiatingProcessAccountUpn', 'InitiatingProcessAccountObjectId'],
                 'identifiers': {
                     'Name': ['AccountName', 'InitiatingProcessAccountName'],
                     'NTDomain': ['AccountDomain', 'InitiatingProcessAccountDomain'],
                     'Sid': ['AccountSid', 'InitiatingProcessAccountSid'],
-                    'UPNSuffix': ['AccountUpn', 'InitiatingProcessAccountUpn']
+                    'UPNSuffix': ['AccountUpn', 'InitiatingProcessAccountUpn'],
+                    'AadUserId': ['AccountObjectId', 'InitiatingProcessAccountObjectId']
                 }
             },
             'Process': {
-                'fields': ['ProcessId', 'ProcessCommandLine', 'FileName', 'FolderPath',
-                          'InitiatingProcessId', 'InitiatingProcessCommandLine', 
-                          'InitiatingProcessFileName', 'InitiatingProcessFolderPath'],
+                'fields': ['ProcessId', 'ProcessCommandLine', 'InitiatingProcessId', 
+                          'InitiatingProcessCommandLine', 'ProcessCreationTime',
+                          'InitiatingProcessCreationTime'],
                 'identifiers': {
                     'ProcessId': ['ProcessId', 'InitiatingProcessId'],
                     'CommandLine': ['ProcessCommandLine', 'InitiatingProcessCommandLine'],
-                    'ProcessName': ['FileName', 'InitiatingProcessFileName'],
-                    'ProcessPath': ['FolderPath', 'InitiatingProcessFolderPath']
+                    'CreationTimeUtc': ['ProcessCreationTime', 'InitiatingProcessCreationTime']
                 }
             },
             'File': {
-                'fields': ['FileName', 'FolderPath', 'SHA1', 'SHA256', 'MD5'],
+                'fields': ['FileName', 'FolderPath'],
                 'identifiers': {
                     'Name': ['FileName'],
-                    'Directory': ['FolderPath'],
-                    'SHA1': ['SHA1'],
-                    'SHA256': ['SHA256'],
-                    'MD5': ['MD5']
+                    'Directory': ['FolderPath']
                 }
             },
             'Host': {
-                'fields': ['DeviceName', 'DeviceId', 'RemoteDeviceName'],
+                'fields': ['DeviceName', 'DeviceId', 'RemoteDeviceName', 'DestinationDeviceName'],
                 'identifiers': {
-                    'HostName': ['DeviceName', 'RemoteDeviceName'],
+                    'HostName': ['DeviceName', 'RemoteDeviceName', 'DestinationDeviceName'],
                     'AzureID': ['DeviceId']
                 }
             },
@@ -77,12 +76,18 @@ class KQLToTerraform:
                                'DestinationIPAddress', 'SenderIPv4', 'SenderIPv6']
                 }
             },
-            'Registry': {
-                'fields': ['RegistryKey', 'RegistryValueName', 'RegistryValueData'],
+            'RegistryKey': {
+                'fields': ['RegistryKey'],
                 'identifiers': {
-                    'Key': ['RegistryKey'],
-                    'Value': ['RegistryValueName'],
-                    'ValueData': ['RegistryValueData']
+                    'Key': ['RegistryKey']
+                }
+            },
+            'RegistryValue': {
+                'fields': ['RegistryValueName', 'RegistryValueData', 'RegistryValueType'],
+                'identifiers': {
+                    'Name': ['RegistryValueName'],
+                    'Value': ['RegistryValueData'],
+                    'ValueType': ['RegistryValueType']
                 }
             },
             'URL': {
@@ -231,21 +236,32 @@ class KQLToTerraform:
         table_fields = self.schemas[table_name].get('common_fields', [])
         entity_mappings = []
         
+        # Priority order: Account, Host, IP must always be included if available
+        priority_entities = ['Account', 'Host', 'IP']
+        other_entities = [e for e in self.entity_mappings.keys() if e not in priority_entities]
+        ordered_entities = priority_entities + other_entities
+        
         # Analyze query to find which fields are used
         query_lower = query.lower()
         
-        for entity_type, config in self.entity_mappings.items():
+        for entity_type in ordered_entities:
+            if entity_type not in self.entity_mappings:
+                continue
+                
+            config = self.entity_mappings[entity_type]
             field_mappings = []
             
             for identifier, field_names in config['identifiers'].items():
                 for field_name in field_names:
-                    # Check if field exists in table schema and is referenced in query
-                    if field_name in table_fields and field_name.lower() in query_lower:
-                        field_mappings.append({
-                            'identifier': identifier,
-                            'column_name': field_name
-                        })
-                        break  # Only add one field per identifier
+                    # For Account, Host, IP: always add if field exists in table
+                    # For others: only add if field is referenced in query
+                    if field_name in table_fields:
+                        if entity_type in priority_entities or field_name.lower() in query_lower:
+                            field_mappings.append({
+                                'identifier': identifier,
+                                'column_name': field_name
+                            })
+                            break  # Only add one field per identifier
             
             # Add entity mapping if we found any fields
             if field_mappings:
@@ -402,6 +418,11 @@ class KQLToTerraform:
             if not metadata or not metadata.get('query'):
                 print(f"Skipping {relative_path} - no query found")
                 return False
+            
+            # Remove leading 'KQL' folder from path if present
+            path_parts = relative_path.parts
+            if path_parts and path_parts[0].upper() == 'KQL':
+                relative_path = Path(*path_parts[1:])
             
             # Determine output directory (preserve folder structure)
             output_subdir = self.output_dir / relative_path.parent
